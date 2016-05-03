@@ -1,0 +1,228 @@
+#!/usr/bin/env python
+
+import rospy
+
+import csv
+
+from geometry_msgs.msg import Twist
+from visualization_msgs.msg import Marker
+from visualization_msgs.msg import MarkerArray
+from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
+from std_msgs.msg import Header, ColorRGBA, String
+from nav_msgs.msg import Odometry
+import tf
+from tf.transformations import euler_from_quaternion
+import time, os
+
+import sys, select, termios, tty, math, tf
+
+import actionlib
+from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+
+msg = """
+Control Your Turtlebot!
+---------------------------
+Moving around:
+   u    i    o
+   j    k    l
+   m    ,    .
+
+q/z : increase/decrease max speeds by 10%
+w/x : increase/decrease only linear speed by 10%
+e/c : increase/decrease only angular speed by 10%
+space key, k : force stop
+anything else : stop smoothly
+
+p : to post a marker
+g : to go to a marker
+
+CTRL-C to quit
+"""
+
+moveBindings = {
+        'i':(1,0),
+        'o':(1,-1),
+        'j':(0,1),
+        'l':(0,-1),
+        'u':(1,1),
+        ',':(-1,0),
+        '.':(-1,1),
+        'm':(-1,-1),
+           }
+
+speedBindings={
+        'q':(1.1,1.1),
+        'z':(.9,.9),
+        'w':(1.1,1),
+        'x':(.9,1),
+        'e':(1,1.1),
+        'c':(1,.9),
+          }
+
+def getKey():
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+speed = .2
+turn = 1
+
+marker_id = 0
+markers = {}
+
+def vels(speed,turn):
+    return "currently:\tspeed %s\tturn %s " % (speed,turn)
+
+def place_marker(marker_publisher, listener):
+    listener.waitForTransform('/map', '/base_link', rospy.Time(0), rospy.Duration(4.0))
+    (trans,rot) = listener.lookupTransform('/map', '/base_link', rospy.Time(0))
+
+    name = raw_input("add a name: ")
+
+    create_marker(name, trans[0], trans[1], trans[2], rot[0], rot[1], rot[2], rot[3])
+
+    line = name + "," + str(trans[0]) + "," + str(trans[1]) + "," + str(trans[2]) + "," + str(rot[0]) + "," + str(rot[1]) \
+               + "," + str(rot[2]) + "," + str(rot[3]) + "\n"
+
+    dircur = os.path.dirname(__file__)
+    filename = os.path.join(dircur, 'db/db.csv')
+    with open(filename, "a") as myfile:
+        myfile.write(line)
+
+def read_markers():
+    dircur = os.path.dirname(__file__)
+    filename = os.path.join(dircur, 'db/db.csv')
+    with open(filename, 'r') as csvfile:
+        spamreader = csv.reader(csvfile, delimiter=',', quotechar='|')
+        for row in spamreader:
+            create_marker(row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]), float(row[6]), float(row[7]))
+
+
+def create_marker(name, t0, t1, t2, r0, r1, r2, r3):
+        global marker_id
+        global markers
+        marker = Marker(type=Marker.SPHERE, id=marker_id,
+                        action=Marker.ADD,
+                        pose=Pose(Point(t0, t1, t2), Quaternion(r0, r1, r2, r3)),
+                        scale=Vector3(0.2, 0.2, 0.2),
+                        header=Header(frame_id='map'),
+                        color=ColorRGBA(0.0, 1.0, 0.0, 0.8))
+        markers[name] = marker
+        marker_publisher.publish(marker)
+        marker_id += 1
+
+def goto_marker(sac):
+    global markers
+    name = raw_input("name of place: ")
+    marker = markers[name]
+
+    goal = MoveBaseGoal()
+    goal.target_pose.header.frame_id = 'map'
+    goal.target_pose.header.stamp = rospy.Time.now()
+    goal.target_pose.pose = marker.pose
+
+    sac.send_goal(goal)
+
+    success = sac.wait_for_result(rospy.Duration(60))
+    state = sac.get_state()
+
+    print "move base " + str(success)
+
+
+if __name__=="__main__":
+    settings = termios.tcgetattr(sys.stdin)
+
+    rospy.init_node('navigator')
+    pub = rospy.Publisher('~cmd_vel', Twist, queue_size=5)
+    marker_publisher = rospy.Publisher('visualization_marker', Marker)
+    sac = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+    sac.wait_for_server(rospy.Duration(5))
+
+    listener = tf.TransformListener()
+    listener.waitForTransform('/base_link', '/map', rospy.Time(0), rospy.Duration(4.0))
+    (trans,rot) = listener.lookupTransform('/base_link', '/map', rospy.Time(0))
+
+    read_markers()
+
+    x = 0
+    th = 0
+    status = 0
+    count = 0
+    acc = 0.1
+    target_speed = 0
+    target_turn = 0
+    control_speed = 0
+    control_turn = 0
+    try:
+        print msg
+        print vels(speed,turn)
+        while(1):
+
+            key = getKey()
+            if key in moveBindings.keys():
+                x = moveBindings[key][0]
+                th = moveBindings[key][1]
+                count = 0
+            elif key in speedBindings.keys():
+                speed = speed * speedBindings[key][0]
+                turn = turn * speedBindings[key][1]
+                count = 0
+
+                if (status == 14):
+                    print msg
+                status = (status + 1) % 15
+            elif key == ' ' or key == 'k' :
+                x = 0
+                th = 0
+                control_speed = 0
+                control_turn = 0
+            elif key == 'p':
+                place_marker(marker_publisher, listener)
+
+            elif key == 'g':
+
+                goto_marker(sac)
+
+            else:
+                count = count + 1
+                if count > 4:
+                    x = 0
+                    th = 0
+                if (key == '\x03'):
+                    break
+
+            target_speed = speed * x
+            target_turn = turn * th
+
+            if target_speed > control_speed:
+                control_speed = min( target_speed, control_speed + 0.02 )
+            elif target_speed < control_speed:
+                control_speed = max( target_speed, control_speed - 0.02 )
+            else:
+                control_speed = target_speed
+
+            if target_turn > control_turn:
+                control_turn = min( target_turn, control_turn + 0.1 )
+            elif target_turn < control_turn:
+                control_turn = max( target_turn, control_turn - 0.1 )
+            else:
+                control_turn = target_turn
+
+            twist = Twist()
+            twist.linear.x = 1.5 * control_speed; twist.linear.y = 0; twist.linear.z = 0
+            twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 1.5 * control_turn
+            pub.publish(twist)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0; twist.linear.y = 0; twist.linear.z = 0
+        twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 0
+        pub.publish(twist)
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)

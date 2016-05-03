@@ -1,23 +1,17 @@
 #!/usr/bin/env python
 
+# ros imports
 import rospy
-
-import csv
-
 from geometry_msgs.msg import Twist
 from visualization_msgs.msg import Marker
-from visualization_msgs.msg import MarkerArray
 from geometry_msgs.msg import Quaternion, Pose, Point, Vector3
-from std_msgs.msg import Header, ColorRGBA, String
-from nav_msgs.msg import Odometry
-import tf
+from std_msgs.msg import Header, ColorRGBA
+import tf, actionlib
 from tf.transformations import euler_from_quaternion
-import time, os
-
-import sys, select, termios, tty, math, tf
-
-import actionlib
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+
+# python imports
+import sys, select, termios, tty, math, time, os, csv
 
 msg = """
 Control Your Turtlebot!
@@ -59,6 +53,13 @@ speedBindings={
         'c':(1,.9),
           }
 
+# global vars
+speed = .2
+turn = 1
+marker_id = 0
+markers = {}
+
+# reading commands
 def getKey():
     tty.setraw(sys.stdin.fileno())
     rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
@@ -70,24 +71,21 @@ def getKey():
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
     return key
 
-speed = .2
-turn = 1
-
-marker_id = 0
-markers = {}
-
+# current speed for teleop
 def vels(speed,turn):
     return "currently:\tspeed %s\tturn %s " % (speed,turn)
 
+# place a new marker and add it to file
 def place_marker(marker_publisher, listener):
     listener.waitForTransform('/map', '/base_link', rospy.Time(0), rospy.Duration(4.0))
     (trans,rot) = listener.lookupTransform('/map', '/base_link', rospy.Time(0))
 
     name = raw_input("add a name: ")
+    rad = raw_input("add a region radius (0 for place): ")
 
-    create_marker(name, trans[0], trans[1], trans[2], rot[0], rot[1], rot[2], rot[3])
+    create_marker(name, float(rad), trans[0], trans[1], trans[2], rot[0], rot[1], rot[2], rot[3])
 
-    line = name + "," + str(trans[0]) + "," + str(trans[1]) + "," + str(trans[2]) + "," + str(rot[0]) + "," + str(rot[1]) \
+    line = name + "," + str(rad) + "," + str(trans[0]) + "," + str(trans[1]) + "," + str(trans[2]) + "," + str(rot[0]) + "," + str(rot[1]) \
                + "," + str(rot[2]) + "," + str(rot[3]) + "\n"
 
     dircur = os.path.dirname(__file__)
@@ -95,32 +93,41 @@ def place_marker(marker_publisher, listener):
     with open(filename, "a") as myfile:
         myfile.write(line)
 
+# read positions from file
 def read_markers():
     dircur = os.path.dirname(__file__)
     filename = os.path.join(dircur, 'db/db.csv')
     with open(filename, 'r') as csvfile:
         spamreader = csv.reader(csvfile, delimiter=',', quotechar='|')
         for row in spamreader:
-            create_marker(row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]), float(row[6]), float(row[7]))
+            create_marker(row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4]), float(row[5]), float(row[6]), float(row[7]), float(row[8]))
 
-
-def create_marker(name, t0, t1, t2, r0, r1, r2, r3):
+# create a new marker and add it to screen
+def create_marker(name, rad, t0, t1, t2, r0, r1, r2, r3):
         global marker_id
         global markers
+        if rad == 0:
+            diam = 0.2
+            c = ColorRGBA(0.0, 1.0, 0.0, 0.7)
+        else:
+            diam = float(rad) * 2
+            c = ColorRGBA(1.0, 0.0, 0.0, 0.4)
         marker = Marker(type=Marker.SPHERE, id=marker_id,
                         action=Marker.ADD,
                         pose=Pose(Point(t0, t1, t2), Quaternion(r0, r1, r2, r3)),
-                        scale=Vector3(0.2, 0.2, 0.2),
+                        scale=Vector3(diam, diam, diam),
                         header=Header(frame_id='map'),
-                        color=ColorRGBA(0.0, 1.0, 0.0, 0.8))
-        markers[name] = marker
+                        color=c)
+        #print marker
+        markers[name] = (marker, rad)
         marker_publisher.publish(marker)
         marker_id += 1
 
-def goto_marker(sac):
+# prompts user for name of marker and then go to it
+def goto_marker(sac, listener):
     global markers
     name = raw_input("name of place: ")
-    marker = markers[name]
+    marker = markers[name][0]
 
     goal = MoveBaseGoal()
     goal.target_pose.header.frame_id = 'map'
@@ -128,12 +135,24 @@ def goto_marker(sac):
     goal.target_pose.pose = marker.pose
 
     sac.send_goal(goal)
-
+    rad = markers[name][1]
+    if (rad > 0.001):
+        while True:
+            state = sac.get_state()
+            listener.waitForTransform('/base_link', '/map', rospy.Time(0), rospy.Duration(4.0))
+            (trans,rot) = listener.lookupTransform('/base_link', '/map', rospy.Time(0))
+            dest = get_distance(trans[0], trans[1], marker.pose.position.x, marker.pose.position.y)
+            if dest < rad:
+                sac.cancel_goal()
+                success = True
+                break
+            time.sleep(0.01)
     success = sac.wait_for_result(rospy.Duration(60))
-    state = sac.get_state()
-
     print "move base " + str(success)
 
+# get distance
+def get_distance(x1, y1, x2, y2):
+    return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
 
 if __name__=="__main__":
     settings = termios.tcgetattr(sys.stdin)
@@ -186,8 +205,7 @@ if __name__=="__main__":
                 place_marker(marker_publisher, listener)
 
             elif key == 'g':
-
-                goto_marker(sac)
+                goto_marker(sac, listener)
 
             else:
                 count = count + 1

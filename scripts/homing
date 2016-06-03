@@ -226,8 +226,8 @@ if __name__=="__main__":
                 control_turn = target_turn
 
             twist = Twist()
-            twist.linear.x = control_speed; twist.linear.y = 0; twist.linear.z = 0
-            twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = control_turn
+            twist.linear.x = 1.5 * control_speed; twist.linear.y = 0; twist.linear.z = 0
+            twist.angular.x = 0; twist.angular.y = 0; twist.angular.z = 1.5 * control_turn
             pub.publish(twist)
 
 
